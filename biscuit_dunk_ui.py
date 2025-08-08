@@ -12,7 +12,7 @@ class BiscuitDunkerDetector:
         self.green_strip_gap_cm = 1
         self.biscuit_length_cm = 5.6
         
-        # Timer
+        # Timer (for aggregate stats)
         self.is_dunking = False
         self.dunk_start_time = None
         self.total_dunk_time = 0
@@ -22,7 +22,7 @@ class BiscuitDunkerDetector:
         self.is_strips_fixed = False
         self.target_strips_count = 7  
 
-        # Calibration
+        # Calibration / smoothing
         self.pixels_per_cm = None
         self.last_depth_int = 0
 
@@ -98,7 +98,7 @@ class BiscuitDunkerDetector:
             if spacing > 0:
                 self.pixels_per_cm = spacing / self.green_strip_gap_cm
         if not self.pixels_per_cm:
-            self.pixels_per_cm = 15  
+            self.pixels_per_cm = 15  # fallback
 
         biscuit_bottom = max(pt[0][1] for pt in biscuit_contour)
         water_surface = green_strips[0][0]
@@ -107,6 +107,7 @@ class BiscuitDunkerDetector:
 
         depth_cm = (biscuit_bottom - water_surface) / self.pixels_per_cm
 
+        # Snap to integer with tolerance
         depth_int = int(round(depth_cm))
         if abs(depth_cm - self.last_depth_int) < 0.3:
             depth_int = self.last_depth_int
@@ -147,10 +148,23 @@ def main():
     safe_times = {1: 9, 2: 6, 3: 4, 4: 3}
     danger_times = {1: 12, 2: 8, 3: 7, 4: 5}
 
-    # Countdown state
-    if 'depth_start_time' not in st.session_state:
-        st.session_state.depth_start_time = None
-        st.session_state.current_depth = 0
+    # Debounce & reset tuning (adjust if you want more/less tolerance)
+    DEPTH_DEBOUNCE_TIME = 0.35  # seconds a new depth must persist to be accepted
+    ZERO_RESET_TIME = 0.6       # seconds of continuous zero-depth to consider biscuit removed
+
+    # Session state for new behavior (initialize once)
+    if 'global_dunk_start' not in st.session_state:
+        st.session_state.global_dunk_start = None   # set when biscuit first touches water
+    if 'debounced_depth' not in st.session_state:
+        st.session_state.debounced_depth = 0        # depth after debounce
+    if 'depth_candidate' not in st.session_state:
+        st.session_state.depth_candidate = None
+    if 'depth_change_since' not in st.session_state:
+        st.session_state.depth_change_since = None
+    if 'zero_since' not in st.session_state:
+        st.session_state.zero_since = None
+    if 'max_depth_reached' not in st.session_state:
+        st.session_state.max_depth_reached = 0      # never decreases within a session
 
     with st.sidebar:
         st.header("🎛️ Controls")
@@ -177,13 +191,18 @@ def main():
         sat_max = st.slider("Saturation Max", sat_min, 255, 255)
         val_max = st.slider("Brightness Max", val_min, 255, 255)
 
-        if st.button("🔄 Reset Timer"):
+        if st.button("🔄 Reset Timer / Session"):
             detector.is_dunking = False
             detector.dunk_start_time = None
             detector.total_dunk_time = 0
-            st.session_state.depth_start_time = None
-            st.session_state.current_depth = 0
-            st.success("Timer reset!")
+            # reset our new session vars
+            st.session_state.global_dunk_start = None
+            st.session_state.debounced_depth = 0
+            st.session_state.depth_candidate = None
+            st.session_state.depth_change_since = None
+            st.session_state.zero_since = None
+            st.session_state.max_depth_reached = 0
+            st.success("Timer & session reset!")
 
     col1, col2 = st.columns([2, 1])
     with col1:
@@ -222,24 +241,87 @@ def main():
             if biscuit_detected and green_strips:
                 dunk_depth = detector.calculate_dunk_depth(biscuit_contour, green_strips)
 
-            is_dunking = dunk_depth > 0
-            current_session = detector.update_timer(is_dunking)
+            # Keep detector's own dunk timer (for total session time)
+            is_currently_dunking = dunk_depth > 0
+            current_session = detector.update_timer(is_currently_dunking)
 
-            # Countdown timer logic
-            if dunk_depth in safe_times:
-                if st.session_state.current_depth != dunk_depth:
-                    st.session_state.current_depth = dunk_depth
-                    st.session_state.depth_start_time = time.time()
+            # ----------------------
+            # New robust countdown logic
+            # ----------------------
+            now = time.time()
 
-                elapsed = time.time() - st.session_state.depth_start_time
-                safe_remaining = max(0, safe_times[dunk_depth] - elapsed)
-                danger_remaining = max(0, danger_times[dunk_depth] - elapsed)
+            if dunk_depth > 0:
+                # clear zero/remove timer
+                st.session_state.zero_since = None
+
+                # start global dunk start time (only once per dunk session)
+                if st.session_state.global_dunk_start is None:
+                    st.session_state.global_dunk_start = now
+
+                # debounce candidate depth changes
+                if st.session_state.depth_candidate is None or dunk_depth != st.session_state.depth_candidate:
+                    st.session_state.depth_candidate = dunk_depth
+                    st.session_state.depth_change_since = now
+                else:
+                    # candidate persists — upgrade to debounced depth after debounce time
+                    if st.session_state.debounced_depth != st.session_state.depth_candidate:
+                        if now - (st.session_state.depth_change_since or now) >= DEPTH_DEBOUNCE_TIME:
+                            st.session_state.debounced_depth = st.session_state.depth_candidate
+                            # update max depth reached — only increases during a session
+                            if st.session_state.debounced_depth > st.session_state.max_depth_reached:
+                                st.session_state.max_depth_reached = st.session_state.debounced_depth
+
+                # active depth for countdown = max depth reached so far (never lowers mid-session)
+                active_depth = st.session_state.max_depth_reached if st.session_state.max_depth_reached > 0 else st.session_state.debounced_depth
+
+                if st.session_state.global_dunk_start is not None and active_depth in safe_times:
+                    elapsed = now - st.session_state.global_dunk_start
+                    safe_remaining = max(0.0, safe_times[active_depth] - elapsed)
+                    danger_remaining = max(0.0, danger_times[active_depth] - elapsed)
+                else:
+                    safe_remaining = 0.0
+                    danger_remaining = 0.0
+
             else:
-                st.session_state.depth_start_time = None
-                st.session_state.current_depth = 0
-                safe_remaining = 0
-                danger_remaining = 0
+                # detected depth == 0 (not in water)
+                if st.session_state.global_dunk_start is None:
+                    # nothing to do
+                    st.session_state.depth_candidate = None
+                    st.session_state.debounced_depth = 0
+                    st.session_state.max_depth_reached = 0
+                    safe_remaining = 0.0
+                    danger_remaining = 0.0
+                else:
+                    # start zero persistence timer; only reset session if zero is stable for ZERO_RESET_TIME
+                    if st.session_state.zero_since is None:
+                        st.session_state.zero_since = now
+                        safe_remaining = 0.0
+                        danger_remaining = 0.0
+                    else:
+                        if now - st.session_state.zero_since >= ZERO_RESET_TIME:
+                            # consider biscuit removed — reset session
+                            st.session_state.global_dunk_start = None
+                            st.session_state.debounced_depth = 0
+                            st.session_state.depth_candidate = None
+                            st.session_state.depth_change_since = None
+                            st.session_state.zero_since = None
+                            st.session_state.max_depth_reached = 0
+                            safe_remaining = 0.0
+                            danger_remaining = 0.0
+                        else:
+                            # still within grace period — show last known remaining based on max_depth_reached
+                            active_depth = st.session_state.max_depth_reached
+                            if active_depth in safe_times and st.session_state.global_dunk_start:
+                                elapsed = now - st.session_state.global_dunk_start
+                                safe_remaining = max(0.0, safe_times[active_depth] - elapsed)
+                                danger_remaining = max(0.0, danger_times[active_depth] - elapsed)
+                            else:
+                                safe_remaining = 0.0
+                                danger_remaining = 0.0
 
+            # ----------------------
+            # Draw and display UI
+            # ----------------------
             if biscuit_detected and biscuit_contour is not None:
                 cv2.drawContours(frame_overlay, [biscuit_contour], -1, (0, 0, 255), 2,
                                  offset=(detector.roi_x1, detector.roi_y1))
@@ -265,21 +347,24 @@ def main():
             camera_placeholder.image(frame_rgb, channels="RGB", use_container_width=True)
 
             with depth_placeholder.container():
-                st.metric("🎯 Dunk Depth", f"{dunk_depth} cm")
-                st.metric("📏 Green Strips Detected", len(green_strips))
-                st.metric("🔒 Strips Status", "Fixed" if detector.is_strips_fixed else "Calibrating")
+                st.metric("🎯 Dunk Depth (raw)", f"{dunk_depth} cm")
+                st.metric("🧾 Debounced Depth", f"{st.session_state.debounced_depth} cm")
+                st.metric("🔼 Max Depth Reached", f"{st.session_state.max_depth_reached} cm")
 
             with timer_placeholder.container():
                 st.metric("✅ Safe Time Left", f"{safe_remaining:.1f}s")
                 st.metric("⚠️ Danger Time Left", f"{danger_remaining:.1f}s")
+                total_time = detector.total_dunk_time + (current_session if current_session else 0)
+                st.metric("🕒 Total Dunk Time", f"{total_time:.1f}s")
 
+            # Status messaging
             if not biscuit_detected:
                 status = "❌ Position biscuit in detection area"
             elif not detector.is_strips_fixed:
                 status = f"🔍 Calibrating green strips... Found {len(green_strips)}/{detector.target_strips_count}"
             elif not green_strips:
                 status = "❌ Green strips calibration lost - reset needed"
-            elif dunk_depth == 0:
+            elif st.session_state.global_dunk_start is None or st.session_state.max_depth_reached == 0:
                 status = "✅ Ready to measure - lower biscuit into water"
             else:
                 if safe_remaining <= 0 < danger_remaining:
@@ -287,7 +372,7 @@ def main():
                 elif danger_remaining <= 0:
                     status = "💥 BISCUIT FAILURE IMMINENT!"
                 else:
-                    status = f"🎯 Dunking! {dunk_depth}cm deep"
+                    status = f"🎯 Dunking! active depth {st.session_state.max_depth_reached}cm"
             status_placeholder.markdown(f"**Status:** {status}")
 
             time.sleep(0.03)
