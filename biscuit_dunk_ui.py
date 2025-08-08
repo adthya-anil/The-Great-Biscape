@@ -9,7 +9,7 @@ class BiscuitDunkerDetector:
         self.roi_y1 = 100
         self.roi_x2 = 500
         self.roi_y2 = 400
-        self.green_strip_gap_cm = 1  # 1 cm gap between strips
+        self.green_strip_gap_cm = 1
         self.biscuit_length_cm = 5.6
         
         # Timer
@@ -17,22 +17,19 @@ class BiscuitDunkerDetector:
         self.dunk_start_time = None
         self.total_dunk_time = 0
 
-        # Fixed green strips storage - changed to store permanently
+        # Fixed green strips
         self.fixed_green_strips = None
         self.is_strips_fixed = False
-        self.target_strips_count = 7  # Expected number of green strips
+        self.target_strips_count = 7  
 
         # Calibration
         self.pixels_per_cm = None
         self.last_depth_int = 0
 
     def detect_and_fix_green_strips(self, frame):
-        """Detect green strips and fix them permanently once found."""
-        # If already fixed, return the fixed strips
         if self.is_strips_fixed and self.fixed_green_strips is not None:
             return self.fixed_green_strips, None
         
-        # Detect green strips
         roi = frame[self.roi_y1:self.roi_y2, self.roi_x1:self.roi_x2]
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
 
@@ -55,30 +52,24 @@ class BiscuitDunkerDetector:
 
         strips.sort(key=lambda x: x[0])
         
-        # Fix strips if we found the target number
         if len(strips) >= self.target_strips_count and not self.is_strips_fixed:
-            self.fixed_green_strips = strips[:self.target_strips_count]  # Take first 7 strips
+            self.fixed_green_strips = strips[:self.target_strips_count]  
             self.is_strips_fixed = True
             return self.fixed_green_strips, mask
         
-        # Return current detection if not yet fixed
         return strips, mask
 
     def reset_green_strips_calibration(self):
-        """Reset the green strips calibration to allow re-detection."""
         self.fixed_green_strips = None
         self.is_strips_fixed = False
 
     def detect_biscuit(self, frame):
-        """Detect biscuit both above & below water using dual HSV ranges."""
         roi = frame[self.roi_y1:self.roi_y2, self.roi_x1:self.roi_x2]
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
 
-        # Above-water
         lower_above = getattr(self, 'lower_biscuit', np.array([8, 60, 100]))
         upper_above = getattr(self, 'upper_biscuit', np.array([25, 255, 255]))
 
-        # Below-water (darker/desaturated)
         lower_below = np.array([8, 30, 50])
         upper_below = np.array([25, 180, 200])
 
@@ -94,25 +85,21 @@ class BiscuitDunkerDetector:
         if not contours:
             return False, None, mask
 
-        # Merge contours
         all_points = np.vstack(contours)
         hull = cv2.convexHull(all_points)
         return True, hull, mask
 
     def calculate_dunk_depth(self, biscuit_contour, green_strips):
-        """Calculate depth in cm, auto-calibrated, with integer snapping."""
         if biscuit_contour is None or len(green_strips) == 0:
             return 0
 
-        # Auto-calibrate pixels/cm using fixed strips
         if len(green_strips) >= 2:
             spacing = green_strips[1][0] - green_strips[0][0]
             if spacing > 0:
                 self.pixels_per_cm = spacing / self.green_strip_gap_cm
         if not self.pixels_per_cm:
-            self.pixels_per_cm = 15  # fallback
+            self.pixels_per_cm = 15  
 
-        # Get biscuit bottom pixel
         biscuit_bottom = max(pt[0][1] for pt in biscuit_contour)
         water_surface = green_strips[0][0]
         if biscuit_bottom <= water_surface:
@@ -120,7 +107,6 @@ class BiscuitDunkerDetector:
 
         depth_cm = (biscuit_bottom - water_surface) / self.pixels_per_cm
 
-        # Snap to integer with tolerance
         depth_int = int(round(depth_cm))
         if abs(depth_cm - self.last_depth_int) < 0.3:
             depth_int = self.last_depth_int
@@ -157,6 +143,15 @@ def main():
         st.session_state.detector = BiscuitDunkerDetector()
     detector = st.session_state.detector
 
+    # Biscuit safe/danger times (sec)
+    safe_times = {1: 9, 2: 6, 3: 4, 4: 3}
+    danger_times = {1: 12, 2: 8, 3: 7, 4: 5}
+
+    # Countdown state
+    if 'depth_start_time' not in st.session_state:
+        st.session_state.depth_start_time = None
+        st.session_state.current_depth = 0
+
     with st.sidebar:
         st.header("🎛️ Controls")
         st.subheader("Detection Area")
@@ -186,6 +181,8 @@ def main():
             detector.is_dunking = False
             detector.dunk_start_time = None
             detector.total_dunk_time = 0
+            st.session_state.depth_start_time = None
+            st.session_state.current_depth = 0
             st.success("Timer reset!")
 
     col1, col2 = st.columns([2, 1])
@@ -219,8 +216,6 @@ def main():
 
             frame_overlay = detector.draw_roi(frame.copy())
             biscuit_detected, biscuit_contour, _ = detector.detect_biscuit(frame)
-            
-            # Use the new method that fixes green strips permanently
             green_strips, _ = detector.detect_and_fix_green_strips(frame)
 
             dunk_depth = 0
@@ -230,14 +225,27 @@ def main():
             is_dunking = dunk_depth > 0
             current_session = detector.update_timer(is_dunking)
 
+            # Countdown timer logic
+            if dunk_depth in safe_times:
+                if st.session_state.current_depth != dunk_depth:
+                    st.session_state.current_depth = dunk_depth
+                    st.session_state.depth_start_time = time.time()
+
+                elapsed = time.time() - st.session_state.depth_start_time
+                safe_remaining = max(0, safe_times[dunk_depth] - elapsed)
+                danger_remaining = max(0, danger_times[dunk_depth] - elapsed)
+            else:
+                st.session_state.depth_start_time = None
+                st.session_state.current_depth = 0
+                safe_remaining = 0
+                danger_remaining = 0
+
             if biscuit_detected and biscuit_contour is not None:
                 cv2.drawContours(frame_overlay, [biscuit_contour], -1, (0, 0, 255), 2,
                                  offset=(detector.roi_x1, detector.roi_y1))
 
-            # Draw green strips (now fixed positions)
             for i, (top, _) in enumerate(green_strips):
                 y1 = detector.roi_y1 + top
-                # Different color if strips are fixed
                 color = (0, 255, 0) if detector.is_strips_fixed else (0, 255, 255)
                 line_thickness = 3 if detector.is_strips_fixed else 2
                 cv2.line(frame_overlay, (detector.roi_x1, y1), (detector.roi_x2, y1), color, line_thickness)
@@ -249,7 +257,6 @@ def main():
                 cv2.putText(frame_overlay, f"Depth: {dunk_depth} cm", (10, 40),
                             cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 3)
 
-            # Add calibration status indicator
             if detector.is_strips_fixed:
                 cv2.putText(frame_overlay, "GREEN STRIPS FIXED", (10, frame.shape[0] - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
@@ -261,10 +268,10 @@ def main():
                 st.metric("🎯 Dunk Depth", f"{dunk_depth} cm")
                 st.metric("📏 Green Strips Detected", len(green_strips))
                 st.metric("🔒 Strips Status", "Fixed" if detector.is_strips_fixed else "Calibrating")
+
             with timer_placeholder.container():
-                total_time = detector.total_dunk_time + current_session
-                st.metric("⏱️ Current Session", f"{current_session:.1f}s")
-                st.metric("🕒 Total Dunk Time", f"{total_time:.1f}s")
+                st.metric("✅ Safe Time Left", f"{safe_remaining:.1f}s")
+                st.metric("⚠️ Danger Time Left", f"{danger_remaining:.1f}s")
 
             if not biscuit_detected:
                 status = "❌ Position biscuit in detection area"
@@ -275,7 +282,12 @@ def main():
             elif dunk_depth == 0:
                 status = "✅ Ready to measure - lower biscuit into water"
             else:
-                status = f"🎯 Dunking! {dunk_depth}cm deep"
+                if safe_remaining <= 0 < danger_remaining:
+                    status = "⚠️ WARNING: Biscuit near breaking point!"
+                elif danger_remaining <= 0:
+                    status = "💥 BISCUIT FAILURE IMMINENT!"
+                else:
+                    status = f"🎯 Dunking! {dunk_depth}cm deep"
             status_placeholder.markdown(f"**Status:** {status}")
 
             time.sleep(0.03)
