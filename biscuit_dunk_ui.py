@@ -17,12 +17,22 @@ class BiscuitDunkerDetector:
         self.dunk_start_time = None
         self.total_dunk_time = 0
 
+        # Fixed green strips storage - changed to store permanently
+        self.fixed_green_strips = None
+        self.is_strips_fixed = False
+        self.target_strips_count = 7  # Expected number of green strips
+
         # Calibration
         self.pixels_per_cm = None
         self.last_depth_int = 0
 
-    def detect_green_strips(self, frame):
-        """Detect horizontal green strips for depth measurement."""
+    def detect_and_fix_green_strips(self, frame):
+        """Detect green strips and fix them permanently once found."""
+        # If already fixed, return the fixed strips
+        if self.is_strips_fixed and self.fixed_green_strips is not None:
+            return self.fixed_green_strips, None
+        
+        # Detect green strips
         roi = frame[self.roi_y1:self.roi_y2, self.roi_x1:self.roi_x2]
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
 
@@ -44,7 +54,20 @@ class BiscuitDunkerDetector:
                     strips.append((y, y + h))
 
         strips.sort(key=lambda x: x[0])
+        
+        # Fix strips if we found the target number
+        if len(strips) >= self.target_strips_count and not self.is_strips_fixed:
+            self.fixed_green_strips = strips[:self.target_strips_count]  # Take first 7 strips
+            self.is_strips_fixed = True
+            return self.fixed_green_strips, mask
+        
+        # Return current detection if not yet fixed
         return strips, mask
+
+    def reset_green_strips_calibration(self):
+        """Reset the green strips calibration to allow re-detection."""
+        self.fixed_green_strips = None
+        self.is_strips_fixed = False
 
     def detect_biscuit(self, frame):
         """Detect biscuit both above & below water using dual HSV ranges."""
@@ -81,7 +104,7 @@ class BiscuitDunkerDetector:
         if biscuit_contour is None or len(green_strips) == 0:
             return 0
 
-        # Auto-calibrate pixels/cm
+        # Auto-calibrate pixels/cm using fixed strips
         if len(green_strips) >= 2:
             spacing = green_strips[1][0] - green_strips[0][0]
             if spacing > 0:
@@ -128,7 +151,7 @@ class BiscuitDunkerDetector:
 def main():
     st.set_page_config(page_title="Biscuit Dunk Timer", layout="wide")
     st.title("🍪 Biscuit Dunking Timer & Depth Detector")
-    st.markdown("*Accurate, stable dunk depth & timing measurement*")
+    st.markdown("*Accurate, stable dunk depth & timing measurement with fixed green strips*")
 
     if 'detector' not in st.session_state:
         st.session_state.detector = BiscuitDunkerDetector()
@@ -141,6 +164,15 @@ def main():
         detector.roi_y1 = st.slider("Top", 0, 400, detector.roi_y1)
         detector.roi_x2 = st.slider("Right", detector.roi_x1 + 50, 640, detector.roi_x2)
         detector.roi_y2 = st.slider("Bottom", detector.roi_y1 + 50, 480, detector.roi_y2)
+
+        st.subheader("Green Strips Calibration")
+        st.write(f"Target strips: {detector.target_strips_count}")
+        strips_status = "✅ Fixed" if detector.is_strips_fixed else "❌ Not calibrated"
+        st.write(f"Status: {strips_status}")
+        
+        if st.button("🔄 Reset Green Strips"):
+            detector.reset_green_strips_calibration()
+            st.success("Green strips calibration reset!")
 
         st.subheader("Biscuit Color Tuning")
         hue_min = st.slider("Hue Min", 0, 179, 8)
@@ -187,7 +219,9 @@ def main():
 
             frame_overlay = detector.draw_roi(frame.copy())
             biscuit_detected, biscuit_contour, _ = detector.detect_biscuit(frame)
-            green_strips, _ = detector.detect_green_strips(frame)
+            
+            # Use the new method that fixes green strips permanently
+            green_strips, _ = detector.detect_and_fix_green_strips(frame)
 
             dunk_depth = 0
             if biscuit_detected and green_strips:
@@ -200,16 +234,25 @@ def main():
                 cv2.drawContours(frame_overlay, [biscuit_contour], -1, (0, 0, 255), 2,
                                  offset=(detector.roi_x1, detector.roi_y1))
 
+            # Draw green strips (now fixed positions)
             for i, (top, _) in enumerate(green_strips):
                 y1 = detector.roi_y1 + top
-                cv2.line(frame_overlay, (detector.roi_x1, y1), (detector.roi_x2, y1), (0, 255, 0), 2)
+                # Different color if strips are fixed
+                color = (0, 255, 0) if detector.is_strips_fixed else (0, 255, 255)
+                line_thickness = 3 if detector.is_strips_fixed else 2
+                cv2.line(frame_overlay, (detector.roi_x1, y1), (detector.roi_x2, y1), color, line_thickness)
                 label = "Water Level (0cm)" if i == 0 else f"{i}cm deep"
                 cv2.putText(frame_overlay, label, (detector.roi_x2 + 5, y1),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
 
             if dunk_depth > 0:
                 cv2.putText(frame_overlay, f"Depth: {dunk_depth} cm", (10, 40),
                             cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 3)
+
+            # Add calibration status indicator
+            if detector.is_strips_fixed:
+                cv2.putText(frame_overlay, "GREEN STRIPS FIXED", (10, frame.shape[0] - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
             frame_rgb = cv2.cvtColor(frame_overlay, cv2.COLOR_BGR2RGB)
             camera_placeholder.image(frame_rgb, channels="RGB", use_container_width=True)
@@ -217,6 +260,7 @@ def main():
             with depth_placeholder.container():
                 st.metric("🎯 Dunk Depth", f"{dunk_depth} cm")
                 st.metric("📏 Green Strips Detected", len(green_strips))
+                st.metric("🔒 Strips Status", "Fixed" if detector.is_strips_fixed else "Calibrating")
             with timer_placeholder.container():
                 total_time = detector.total_dunk_time + current_session
                 st.metric("⏱️ Current Session", f"{current_session:.1f}s")
@@ -224,8 +268,10 @@ def main():
 
             if not biscuit_detected:
                 status = "❌ Position biscuit in detection area"
+            elif not detector.is_strips_fixed:
+                status = f"🔍 Calibrating green strips... Found {len(green_strips)}/{detector.target_strips_count}"
             elif not green_strips:
-                status = "❌ Green measurement strips not detected"
+                status = "❌ Green strips calibration lost - reset needed"
             elif dunk_depth == 0:
                 status = "✅ Ready to measure - lower biscuit into water"
             else:
