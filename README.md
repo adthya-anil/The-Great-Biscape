@@ -4,6 +4,7 @@
 
 ---
 
+
 ## 🚀 About the Project  
 Have you ever dunked a biscuit into tea, stared into its soggy soul, and prayed it doesn’t betray you?  
 We did.  
@@ -51,6 +52,15 @@ We decided to prove that uselessness is an art form… and also an exact science
 ---
 
 ## 🧠 How It Works (Biscuit Science™)
+
+<img width="1414" height="778" alt="image" src="https://github.com/user-attachments/assets/2b2c9810-57e7-4b36-a872-c68bc4a9212b" />
+
+<img width="1407" height="808" alt="image" src="https://github.com/user-attachments/assets/b5a232e9-af9d-4bfd-ab65-6cd594d20081" />
+
+<img width="1402" height="760" alt="image" src="https://github.com/user-attachments/assets/51f1185f-c07c-4241-969a-25a9637d858a" />
+
+
+
 - Place the glass with **7 green strips** stuck vertically.
 - The camera detects these strips and locks the frame.
 - Drop the biscuit into the tea/milk — *science engages*.  
