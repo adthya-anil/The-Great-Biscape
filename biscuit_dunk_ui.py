@@ -2,7 +2,87 @@ import streamlit as st
 import cv2
 import numpy as np
 import time
+import serial
+import threading
 
+# ------------------- Serial controller -------------------
+class SerialController:
+    def __init__(self, port='COM4', baudrate=9600, timeout=1, sample_interval=1.0):
+        self.port = port
+        self.baudrate = baudrate
+        self.timeout = timeout
+        self.sample_interval = sample_interval
+
+        self.ser = None
+        self.thread = None
+        self.running = False
+        self.temperature_value = None
+        self.error = None
+
+    def start(self):
+        """Open serial connection and spin up reader thread. Safe to call multiple times."""
+        if self.running:
+            return  # already running
+
+        try:
+            self.ser = serial.Serial(self.port, baudrate=self.baudrate, timeout=self.timeout)
+            self.error = None
+        except Exception as e:
+            self.ser = None
+            self.error = str(e)
+            print(f"[SerialController] error opening {self.port}: {self.error}")
+            return
+
+        self.running = True
+        self.thread = threading.Thread(target=self._read_loop, daemon=True)
+        self.thread.start()
+
+    def _read_loop(self):
+        """Background reader loop that updates self.temperature_value."""
+        try:
+            while self.running and self.ser:
+                try:
+                    # read a line (Arduino should send one numeric temp per line)
+                    line = self.ser.readline().decode('utf-8', errors='ignore').strip()
+                    if line:
+                        try:
+                            # try parse float; if fails ignore line
+                            self.temperature_value = float(line)
+                        except ValueError:
+                            # ignore malformed lines
+                            pass
+                except Exception as e:
+                    # If reading fails, store error and stop reading
+                    self.error = str(e)
+                    print(f"[SerialController] read error: {self.error}")
+                    break
+
+                time.sleep(self.sample_interval)
+        finally:
+            # ensure serial closed on exit
+            try:
+                if self.ser and self.ser.is_open:
+                    self.ser.close()
+            except Exception:
+                pass
+            self.running = False
+
+    def stop(self):
+        """Signal the thread to stop and close serial."""
+        self.running = False
+        try:
+            if self.thread and self.thread.is_alive():
+                # thread will exit by itself after loop sees running=False
+                self.thread.join(timeout=0.5)
+        except Exception:
+            pass
+        try:
+            if self.ser and self.ser.is_open:
+                self.ser.close()
+        except Exception:
+            pass
+
+# ------------------------ Biscuit Detector (unchanged logic) ------------------------
 class BiscuitDunkerDetector:
     def __init__(self):
         self.roi_x1 = 100
@@ -135,11 +215,47 @@ class BiscuitDunkerDetector:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
         return frame
 
+# ------------------------ Main App (integrated) ------------------------
 def main():
     st.set_page_config(page_title="Biscuit Dunk Timer", layout="wide")
     st.title("🍪 Biscuit Dunking Timer & Depth Detector")
     st.markdown("*Accurate, stable dunk depth & timing measurement with fixed green strips*")
 
+    # --- create serial controller in session_state if not present ---
+    if 'serial_controller' not in st.session_state:
+        # configure port here if you want to change it later
+        st.session_state.serial_controller = SerialController(port='COM4', baudrate=9600, timeout=1, sample_interval=1.0)
+        st.session_state.serial_started = False
+
+    serial_controller = st.session_state.serial_controller
+
+    # Add small controls / status in sidebar for serial
+    with st.sidebar:
+        st.header("🎛️ Controls")
+        st.subheader("Temperature Sensor")
+        if serial_controller.running:
+            st.write("Status: ✅ Connected")
+        else:
+            if serial_controller.error:
+                st.write(f"Status: ❌ Error — {serial_controller.error}")
+            else:
+                st.write("Status: ⚪ Not connected")
+
+        # Button to (re)start serial (useful if Arduino was plugged after app start)
+        if st.button("Connect Temp Sensor (COM4)"):
+            serial_controller.start()
+            time.sleep(0.2)  # give it a moment to attempt open
+
+        # Allow changing COM port if desired (advanced)
+        st.caption("If COM4 is wrong, change code and restart app.")
+
+        # ---------- existing sidebar from original (Detection Area + calibration) ----------
+        st.subheader("Detection Area")
+        # Note: we keep sliders and reset buttons in the same sidebar area as original code expects
+        # We'll create them below again to ensure they exist in the same run (these are placeholders)
+        # Real sliders are defined later to assign to detector values.
+
+    # ---------- original session-state and detector initialization ----------
     if 'detector' not in st.session_state:
         st.session_state.detector = BiscuitDunkerDetector()
     detector = st.session_state.detector
@@ -166,9 +282,9 @@ def main():
     if 'max_depth_reached' not in st.session_state:
         st.session_state.max_depth_reached = 0      # never decreases within a session
 
+    # ----------------- Sidebar controls (original sliders & buttons) -----------------
+    # Placed after detector exists so sliders can update detector values
     with st.sidebar:
-        st.header("🎛️ Controls")
-        st.subheader("Detection Area")
         detector.roi_x1 = st.slider("Left", 0, 500, detector.roi_x1)
         detector.roi_y1 = st.slider("Top", 0, 400, detector.roi_y1)
         detector.roi_x2 = st.slider("Right", detector.roi_x1 + 50, 640, detector.roi_x2)
@@ -204,6 +320,7 @@ def main():
             st.session_state.max_depth_reached = 0
             st.success("Timer & session reset!")
 
+    # ---------------- UI layout ----------------
     col1, col2 = st.columns([2, 1])
     with col1:
         st.header("📹 Live Camera Feed")
@@ -214,6 +331,7 @@ def main():
         timer_placeholder = st.empty()
         status_placeholder = st.empty()
 
+    # ---------------- Video capture setup ----------------
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         st.error("Cannot open camera.")
@@ -221,6 +339,13 @@ def main():
 
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+    # If user hasn't explicitly started the serial controller yet, try to start once automatically
+    if not serial_controller.running and serial_controller.error is None and not st.session_state.get('serial_autostart_attempted', False):
+        # attempt auto start, but only once per Streamlit session
+        serial_controller.start()
+        st.session_state['serial_autostart_attempted'] = True
+        time.sleep(0.1)
 
     try:
         while True:
@@ -350,6 +475,16 @@ def main():
                 st.metric("🎯 Dunk Depth (raw)", f"{dunk_depth} cm")
                 st.metric("🧾 Debounced Depth", f"{st.session_state.debounced_depth} cm")
                 st.metric("🔼 Max Depth Reached", f"{st.session_state.max_depth_reached} cm")
+                # <-- ADDED: temperature metric (shows as extra in UI)
+                temp_val = serial_controller.temperature_value if serial_controller else None
+                if temp_val is not None:
+                    st.metric("🌡 Liquid Temperature", f"{temp_val:.2f} °C")
+                else:
+                    # show useful message when sensor has an error
+                    if serial_controller.error:
+                        st.metric("🌡 Liquid Temperature", "Error")
+                    else:
+                        st.metric("🌡 Liquid Temperature", "N/A")
 
             with timer_placeholder.container():
                 st.metric("✅ Safe Time Left", f"{safe_remaining:.1f}s")
@@ -375,12 +510,22 @@ def main():
                     status = f"🎯 Dunking! active depth {st.session_state.max_depth_reached}cm"
             status_placeholder.markdown(f"**Status:** {status}")
 
+            # small sleep to control loop speed (keeps UI responsive)
             time.sleep(0.03)
 
     except KeyboardInterrupt:
         pass
     finally:
-        cap.release()
+        # Cleanup: release camera and stop serial thread
+        try:
+            cap.release()
+        except Exception:
+            pass
+        # signal serial controller to stop (if exists)
+        try:
+            serial_controller.stop()
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     main()
