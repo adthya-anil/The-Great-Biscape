@@ -1,3 +1,5 @@
+<img width="3188" height="1202" alt="frame (3)" src="https://github.com/user-attachments/assets/517ad8e9-ad22-457d-9538-a9e62d137cd7" />
+
 # 🥖 The Great Biscape  
 **Tagline:** *Kittiya Kitti Poya Poi? Ini Illa!*  
 *"Because every biscuit deserves a fighting chance."*
@@ -72,6 +74,13 @@ We decided to prove that uselessness is an art form… and also an exact science
 - Output: You get told exactly when to save your snack… or when to say goodbye.
 
 ---
+### Project Demo
+# Video
+https://drive.google.com/file/d/1i5WuMAuBvaX11_Ja2Wm_z62RXIOAvlBm/view?usp=drive_link
+
+https://drive.google.com/file/d/1U5ypLvjmP7w0yp4XvSd6uUiHpTM0G7Ov/view?usp=drive_link
+
+---
 
 ## 🏗 Tech Stack
 - **Python**
@@ -82,6 +91,11 @@ We decided to prove that uselessness is an art form… and also an exact science
 
 ---
 
+##  Hardware Used:
+- Arduino uno
+- Temperature Sensor (ds18b20)
+  
+---
 ## 💡 Future Scope (Because Why Stop Here?)
 - Dunk prediction AI trained on biscuit brands (*Marie vs Oreo survival rates*).  
 - Biscuit leaderboard (*for dunking bragging rights*).  
